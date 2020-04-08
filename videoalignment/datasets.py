@@ -14,7 +14,7 @@ import numpy as np
 from scipy.sparse.csgraph import connected_components, csgraph_from_dense
 from torch.utils.data import Dataset
 
-from .my_data import DATASETS
+from videoalignment.my_data import DATASETS
 
 VALID_DATASETS = {"Climbing", "Madonna", "VCDB", "EVVE"}
 

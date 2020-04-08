@@ -15,6 +15,11 @@ from . import datasets, models
 from .datasets import batch, is_the_same_pair
 from .utils import get_device
 
+import time
+import matplotlib.pyplot as plt
+import os
+import cv2
+
 
 def segment_pr(model, dataset, args, phase, crop_before_score=False, merge_mode=None):
     device = get_device(model)
@@ -23,6 +28,7 @@ def segment_pr(model, dataset, args, phase, crop_before_score=False, merge_mode=
 
     # Precompute query descriptors
     query_dataset = dataset(phase, args, get_single_videos=True, pad=False)
+    '''
     query_dataloader = DataLoader(
         query_dataset, batch_size=1, num_workers=min(args.b_s, 2)
     )
@@ -39,6 +45,7 @@ def segment_pr(model, dataset, args, phase, crop_before_score=False, merge_mode=
             query_fvs.append(model.single_fv(ts, xs).detach().cpu().numpy())
         query_lengths.append(ts.shape[1])
     query_fvs = np.concatenate(query_fvs, 0)
+    '''
 
     # Precompute video descriptors
     videos_dataset = dataset(phase, args, get_entire_videos=True, pad=False)
@@ -49,104 +56,303 @@ def segment_pr(model, dataset, args, phase, crop_before_score=False, merge_mode=
     ]
     videos_dataset.videos = entire_videos
     videos_dataloader = DataLoader(
-        videos_dataset, batch_size=1, num_workers=min(args.b_s, 2)
+        videos_dataset, batch_size=1, num_workers=min(args.b_s, 0)
     )
     videos_iter_dl = iter(videos_dataloader)
 
     video_fvs = []
     video_lengths = []
+    all_ts = []
+    all_xs = []
     bar = progressbar.ProgressBar()
     print("Videos Fvs extraction")
     for it, (ts, xs) in enumerate(bar(videos_iter_dl)):
         with torch.no_grad():
             ts = ts.float().to(device)
             xs = xs.float().to(device)
+            all_ts.append(ts.permute(1,0,2))
+            all_xs.append(xs.view(-1))
             video_fvs.append(model.single_fv(ts, xs).detach().cpu().numpy())
         video_lengths.append(xs.shape[1])
     video_fvs = np.concatenate(video_fvs, 0)
 
+    # Plotting score distribution
+    ##################################################################################
+
+    num_of_video = len(all_ts)
+    for i in range(num_of_video):
+        for j in range(i+1, num_of_video):
+            query_feat = all_ts[i][::15].detach().cpu().numpy().squeeze(axis = 1)  # pow(query_feat[1],2).sum() = 1
+            refer_feat = all_ts[j][::15].detach().cpu().numpy().squeeze(axis = 1)
+        
+            query_name = entire_videos[i]['video'].split('/')[-1]
+            refer_name = entire_videos[j]['video'].split('/')[-1]
+
+            correlation_matrix = np.dot(query_feat, refer_feat.T) *255
+
+            correlation_matrix[correlation_matrix<0]=0 # Remove values less than 0
+
+            
+            # get down  :-10
+            down10 = (correlation_matrix.argsort().T[:-10]).T
+            # maps = np.zeros(correlation_matrix.shape)
+            for x,y in enumerate(down10):
+                # Determine query snippet
+                #f ((int(query[0])//1000) <= x) and (x <= (int(query[1])//1000)):
+                    # The 3 most responsive frames in the reference frame are set to 1
+                    # Other values are set to 0
+                correlation_matrix[x, [y_ for y_ in y]] = 0
+            
+
+            correlation_matrix = cv2.cvtColor(correlation_matrix, cv2.COLOR_GRAY2BGR) # gray 2 bgr
+
+            path = 'grayscale/'+query_name+'/'+refer_name
+
+            if not os.path.exists(path):
+                os.makedirs(path)
+            
+            ops = [op
+                        for op in query_dataset.overlapping_pairs
+                        if (
+                            op["videos"][0]["video"] == entire_videos[i]['video']
+                            and op["videos"][1]["video"] == entire_videos[j]['video']
+                        )
+                        or (
+                            op["videos"][1]["video"] == entire_videos[j]['video']
+                            and op["videos"][0]["video"] == entire_videos[i]['video']
+                        )
+                    ]
+            exist_pair = False
+            for opi in ops:
+                exist_pair = True
+                
+                if opi["videos"][0]["video"] == entire_videos[i]['video']:
+                    os_q = opi["videos"][0]
+                    os_v = opi["videos"][1]
+                else:
+                    os_q = opi["videos"][1]
+                    os_v = opi["videos"][0]
+                query_segment = [os_q["begin"], os_q["end"]]
+                refer_segment = [os_v["begin"], os_v["end"]]
+
+                start_point = (int(refer_segment[0]),int(query_segment[0])) # 1000 w.r.t. ms -> s
+                end_point = (int(refer_segment[1]),int(query_segment[1]))
+                color = (0, 0, 255)
+                thinkness = 1
+                cv2.rectangle(correlation_matrix, start_point, end_point, color, thinkness)
+
+            cv2.imwrite(path +'/{a}.jpg'.format(a=exist_pair), correlation_matrix)
+
+
+
+            '''    
+            if not exist_pair:
+                cv2.imwrite(path+'/{a}.jpg'.format(a=exist_pair), correlation_matrix)
+            '''
+    ##################################################################################
+
+        
+
+
+
+
+
+
+
     # Loop over queries
+    query_lengths = [150]
     probas = []
     labels = []
-    for qv, query_fv, query_length in zip(
-        query_dataset.videos, query_fvs, query_lengths
+    query_fvs = [0]
+
+    pic='score_distribute'
+    if not os.path.exists(pic):
+        os.makedirs(pic)
+
+    threshold = 2.1
+    insert_size_threshold = 300 # 400 * 0.01 s
+    file = 'log_{threshold}.txt'.format(threshold = threshold)
+    f= open(file,'w')
+
+    already_qv = []
+    peak_index = 0
+
+    tp,fp,fn = 0,0,0
+
+    for qv, query_ts, query_vs in zip(
+        entire_videos, all_ts, all_xs
     ):
+        # already_qv.append(qv['video'])
         with torch.no_grad():
-            print("Processing", qv)
-            query_fv = torch.from_numpy(query_fv).unsqueeze(0).float().to(device)
+            for i in range(0, len(query_vs), 150):
+                # print('befor:{i}'.format(i=i))
+                # Fix tmk timestamp                         
+                qxs_cur = query_vs[:150][0:(150 if i+150<len(query_vs) else len(query_vs)-i)] ## 150-(i-len(query_vs))
+                
+                qxs_cur = qxs_cur.view(1,-1)
+                qts_cur = query_ts[i:i + 150] 
+                qts_cur = qts_cur.permute(1,0,2)
 
-            for v, video_fv, video_length in zip(
-                entire_videos, video_fvs, video_lengths
-            ):
-                if v["video"] == qv["video"]:
-                    continue
-                video_fv = torch.from_numpy(video_fv).unsqueeze(0).float().to(device)
-                all_offsets = torch.arange(-video_length, 0).unsqueeze(0).to(device)
-                delta = model.score_pair(query_fv, video_fv, all_offsets)
-                score, delta = torch.max(delta, 1)
-                score = score.detach().cpu().numpy()[0]
+                query_fv = model.single_fv(qts_cur, qxs_cur).detach().cpu().numpy()
+                    
+                print("Processing", qv['video'])
+                query_fv = torch.from_numpy(query_fv).float().to(device)
 
-                delta = delta - video_length
-                delta = -delta.data.cpu().numpy()[0]
-                delta = delta / videos_dataset.fps
-                probas.append(score)
-                query_segment = np.around(np.arange(qv["begin"], qv["end"], 0.01), 2)
-                video_segment = np.around(
-                    np.arange(delta, delta + qv["end"] - qv["begin"], 0.01), 2
-                )
+                for v, video_fv, video_length in zip(
+                    entire_videos, video_fvs, video_lengths
+                ):
+                
+                    if v["video"] == qv["video"]  : # for the same video
+                        continue
+                    '''        
+                    if v['video'] in already_qv : # exclude already pair
+                        continue
+                    '''
+                    video_fv = torch.from_numpy(video_fv).unsqueeze(0).float().to(device)
+                    all_offsets = torch.arange(-video_length, 0).unsqueeze(0).to(device)
+                    delta = model.score_pair(query_fv, video_fv, all_offsets)
+                    
 
-                ops = [
-                    op
-                    for op in query_dataset.overlapping_pairs
-                    if (
-                        op["videos"][0]["video"] == qv["video"]
-                        and op["videos"][1]["video"] == v["video"]
+                    # 
+                    '''
+                    a, b = torch.topk(delta,250)
+                    plt.figure()
+                    plt.scatter(b.squeeze(0).cpu().numpy(), a.squeeze(0).cpu().numpy())
+                    d,q =qv['video'].split('/')
+                    r = v['video'].split('/')[1]
+                    path = 'score/'+'{dir}/{q}/{r}'.format(dir =d, q=q, r=r)
+                    if not os.path.exists(path):
+                        os.makedirs(path)
+                    # print('after:{i}'.format(i=i))
+                    plt.savefig(path+'/'+'{i}'.format(path = path, i = i))
+                    '''
+
+                    delta_tmp = delta.clone().detach().cpu().numpy().reshape(-1)[::] # Step size [::?]
+                    
+
+                    score, delta = torch.max(delta, 1)
+                    peak_index = delta.detach().cpu().numpy()[0]
+                    score = score.detach().cpu().numpy()[0]
+                    if score < threshold: # threshold
+                        continue
+
+
+                    delta = delta - video_length
+                    delta = -delta.data.cpu().numpy()[0]
+                    delta = delta / videos_dataset.fps
+
+                    
+                    query_segment = np.around(np.arange(i / videos_dataset.fps, \
+                                                        i / videos_dataset.fps+10, 0.01), 2)
+                    video_segment = np.around(
+                        np.arange(delta, delta + 10, 0.01), 2
                     )
-                    or (
-                        op["videos"][1]["video"] == qv["video"]
-                        and op["videos"][0]["video"] == v["video"]
-                    )
-                ]
-                found = False
-                could_be_fn = False
-                for opi in ops:
-                    if opi["videos"][0]["video"] == qv["video"]:
-                        os_q = opi["videos"][0]
-                        os_v = opi["videos"][1]
+
+                    # 
+                    ops = [
+                        op
+                        for op in query_dataset.overlapping_pairs
+                        if (
+                            op["videos"][0]["video"] == qv["video"]
+                            and op["videos"][1]["video"] == v["video"]
+                        )
+                        or (
+                            op["videos"][1]["video"] == qv["video"]
+                            and op["videos"][0]["video"] == v["video"]
+                        )
+                    ]
+
+                    found = False
+                    could_be_fn = False
+
+                    for opi in ops:
+                        if opi["videos"][0]["video"] == qv["video"]:
+                            os_q = opi["videos"][0]
+                            os_v = opi["videos"][1]
+                        else:
+                            os_q = opi["videos"][1]
+                            os_v = opi["videos"][0]
+                        this_query_segment = np.around(
+                            np.arange(os_q["begin"], os_q["end"], 0.01), 2
+                        )
+                        this_video_segment = np.around(
+                            np.arange(os_v["begin"], os_v["end"], 0.01), 2
+                        )
+
+                        inter_size_q = np.intersect1d(
+                            query_segment, this_query_segment
+                        ).size
+                        inter_size_v = np.intersect1d(
+                            video_segment, this_video_segment
+                        ).size
+
+                        if inter_size_q:
+                            could_be_fn = True
+
+                        # true positive
+                        if inter_size_q > insert_size_threshold and inter_size_v > insert_size_threshold:
+                            found = True
+                            label = 1
+                            labels.append(label)
+                            probas.append(score)
+                            tp =tp+1
+                            break
+
+                    if not found:
+                        # false negative
+                        if could_be_fn:
+                            probas.append(0)
+                            labels.append(1)
+                            fn = fn +1
+                        # false positive
+                        else:
+                            probas.append(score)
+                            labels.append(0)
+                            fp = fp + 1
+
+                    
+
+
+                    qv_begin = i / videos_dataset.fps
+                    qv_begin_c = time.strftime('%H:%M:%S', time.gmtime(qv_begin))
+
+                    qv_end = (i+150) / videos_dataset.fps if (i+150) < len(query_vs)\
+                            else len(query_vs)/videos_dataset.fps
+                    qv_end_c = time.strftime('%H:%M:%S', time.gmtime(qv_end))
+
+                    rv_begin_c = time.strftime('%H:%M:%S', time.gmtime(delta))
+                    rv_end_c = time.strftime('%H:%M:%S', time.gmtime(delta+qv_end - qv_begin)) 
+                    # probas.append(score)
+                    
+                    f.write('dir:{dir}, q_v:{qv}, r_v:{rv}, q_be {qv_b},{qv_e}, r_be {rv_b},{rv_e}, score {s} \n'
+                            .format(dir=qv["video"].split('/')[0],qv = qv["video"].split('/')[1], 
+                            rv = v['video'].split('/')[1],  qv_b = qv_begin_c, qv_e = qv_end_c,
+                            rv_b = rv_begin_c, rv_e = rv_end_c, s = score))
+
+                    '''
+                    for i_value in delta_tmp:
+                        f.write('{d:.3f}\t'.format(d=i_value))
+                    '''
+                    # Remove values near the peak , [-15*15, 15*15]
+                    if peak_index-225>0:
+                        begin_sec = peak_index-225
                     else:
-                        os_q = opi["videos"][1]
-                        os_v = opi["videos"][0]
-                    this_query_segment = np.around(
-                        np.arange(os_q["begin"], os_q["end"], 0.01), 2
-                    )
-                    this_video_segment = np.around(
-                        np.arange(os_v["begin"], os_v["end"], 0.01), 2
-                    )
+                        begin_sec = 0
+                    if peak_index +225 >video_length:
+                        end_sec = video_length
+                    else:
+                        end_sec = peak_index+225
+                    delta_tmp = np.delete(delta_tmp, [c for c in range(begin_sec, end_sec)])
+                    second_max = np.amax(delta_tmp)
+                    f.write('found:{found},first:{a}, second:{b}, ratio:{c}'.format(found=found,a = score, b = second_max, c = score/second_max))
+                    f.write('\n') 
+    precision = tp/(tp+fp)
+    recall = tp/(tp+fn)
+    f1 = 2 * precision * recall/ (precision+recall)
 
-                    inter_size_q = np.intersect1d(
-                        query_segment, this_query_segment
-                    ).size
-                    inter_size_v = np.intersect1d(
-                        video_segment, this_video_segment
-                    ).size
-
-                    if inter_size_q:
-                        could_be_fn = True
-
-                    if inter_size_q > 0 and inter_size_v > 0:
-                        label = 1
-                        found = True
-                        break
-
-                if not found:
-                    label = 0
-                    if could_be_fn:
-                        probas.append(0)
-                        labels.append(1)
-
-                labels.append(label)
-                print(could_be_fn)
-
+    f.write('tp:{tp},fp:{fp},fn:{fn},precision:{precision},recall:{recall},f1:{f1}'.format(tp = tp, fp =fp, fn = fn, precision = precision , recall = recall ,f1 = f1))                  
+    f.close()                
+    # probas = labels = 1   
     return probas, labels
 
 

@@ -10,5 +10,5 @@ DATASETS = {
     "EVVE": "/datasets01/EVVE/112017/",
     "Climbing": "/datasets01/climbing/112017",
     "Madonna": "/datasets01/madonna/112017",
-    "VCDB": "/datasets01/VCDB/112017",
+    "VCDB": "/home/hongwei.guo/m2/work/VCDB",
 }

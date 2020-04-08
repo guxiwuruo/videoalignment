@@ -13,7 +13,9 @@ from collections import defaultdict
 import numpy as np
 import torch
 from sklearn.metrics import auc, precision_recall_curve
-from videoalignment import datasets, eval, models
+from videoalignment import datasets, models  #, eval
+from videoalignment import eval_frag as eval  # test for frame frag
+
 
 
 def test(model, args):
@@ -73,18 +75,18 @@ def main(args):
     args.model = getattr(models, args.model)
 
     # TMK layers setup
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
     model = args.model(args).to(device)
     test(model, args)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Video alignment model evaluation")
-    parser.add_argument("--model", required=True, type=str)
+    parser.add_argument("--model", default='TMK', type=str)
     parser.add_argument(
-        "--output_dir", required=True, type=str, help="Output directory for results"
+        "--output_dir", default='./eval_dir', type=str, help="Output directory for results"
     )
-    parser.add_argument("--dataset_test", required=True, type=str, default=None)
+    parser.add_argument("--dataset_test", default='VCDB', type=str)
     parser.add_argument("--fold_index", required=False, default=0, type=int)
     parser.add_argument("--chunk_randomly", default=1, type=int)
     parser.add_argument("--T", nargs="+", type=int, default=[9767, 2731, 1039, 253])
